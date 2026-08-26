@@ -146,11 +146,19 @@ x1_0 = [ ...
     0.1];
 
 
+% Numerical tolerances used only for the SDP implementation.
+% These do not change the theoretical Algorithm 3 constraints.
+
 % Case 3 small positive-definite lower bound
+epsQ = 1e-6;
+epsR = 1e-6;
 
-epsQ = 1e-8;
+% Bellman residual tolerance after row scaling
+bellTol = 1e-7;
 
-epsR = 1e-8;
+% Small PSD feasibility tolerance used to prevent roundoff-level
+% negative eigenvalues from causing MOSEK numerical failure
+psdTol = 1e-8;
 
 
 %% ===============================================================
@@ -411,22 +419,14 @@ for caseID = 1:3
 
 
         %% =======================================================
-        % BELLMAN EQUATIONS
+        % SCALED BELLMAN EQUATIONS
         %
-        % We construct:
-        %
-        % 1. Original exact equations
-        %
-        % 2. Scaled exact equations
-        %
-        % The scaled equations are used only if MOSEK has a
-        % numerical-conditioning problem.
+        % The theoretical equations are exact.  Numerically, each
+        % residual is scaled by the energy of its data row and then
+        % enforced within +/- bellTol.  This avoids artificial MOSEK
+        % failures when learner and expert equations become nearly
+        % linearly dependent close to policy convergence.
         %% =======================================================
-
-        bellL_original = [];
-
-        bellE_original = [];
-
 
         bellL_scaled = [];
 
@@ -494,20 +494,8 @@ for caseID = 1:3
                 - zeta_e'*LambdaBar*zeta_e;
 
 
-            %% Original exact equations
-
-            bellL_original = [ ...
-                bellL_original;
-                learnerResidual];
-
-
-            bellE_original = [ ...
-                bellE_original;
-                expertResidual];
-
-
             %% ---------------------------------------------------
-            % Numerical scaling
+            % Numerical row scaling
             %% ---------------------------------------------------
 
             scaleL = max([ ...
@@ -522,7 +510,7 @@ for caseID = 1:3
                 1e-3]);
 
 
-            %% Scaled EXACT equations
+            % Scaled Bellman residuals
 
             bellL_scaled = [ ...
                 bellL_scaled;
@@ -607,12 +595,17 @@ for caseID = 1:3
 
         %% =======================================================
         % COMMON CONSTRAINTS
+        %
+        % The small -psdTol allowance is purely numerical.  It lets
+        % matrices with roundoff-level negative eigenvalues (for
+        % example -1e-10) be treated as PSD by the finite-precision
+        % solver.
         %% =======================================================
 
         commonConstraints = [ ...
-            H >= 0, ...
-            He >= 0, ...
-            H-He >= 0];
+            H + psdTol*eye(dH) >= 0, ...
+            He + psdTol*eye(dH) >= 0, ...
+            H-He + psdTol*eye(dH) >= 0];
 
 
         %% =======================================================
@@ -627,64 +620,26 @@ for caseID = 1:3
 
 
         %% =======================================================
-        % FIRST SOLVE:
-        % ORIGINAL EXACT BELLMAN EQUATIONS
+        % NUMERICALLY ROBUST SOLVE
+        %
+        % Instead of requiring floating-point residuals to be exactly
+        % zero, enforce the scaled theoretical Bellman equalities to
+        % solver accuracy: |residual| <= bellTol.
         %% =======================================================
 
-        constraintsOriginal = [ ...
+        constraints = [ ...
             commonConstraints, ...
-            bellL_original == 0, ...
-            bellE_original == 0, ...
+            bellL_scaled <= bellTol, ...
+            bellL_scaled >= -bellTol, ...
+            bellE_scaled <= bellTol, ...
+            bellE_scaled >= -bellTol, ...
             structuralConstraints];
 
 
         sol = optimize( ...
-            constraintsOriginal, ...
+            constraints, ...
             objective, ...
             options);
-
-
-        %% =======================================================
-        % IF NUMERICAL PROBLEM:
-        % RETRY WITH SCALED EXACT EQUATIONS
-        %% =======================================================
-
-        if sol.problem ~= 0
-
-
-            fprintf( ...
-                '\nOriginal solve problem at iteration %d\n', ...
-                iter);
-
-
-            fprintf( ...
-                'YALMIP code = %d\n', ...
-                sol.problem);
-
-
-            fprintf( ...
-                'YALMIP info = %s\n', ...
-                sol.info);
-
-
-            fprintf( ...
-                'Retrying with scaled exact Bellman equations...\n');
-
-
-            constraintsScaled = [ ...
-                commonConstraints, ...
-                bellL_scaled == 0, ...
-                bellE_scaled == 0, ...
-                structuralConstraints];
-
-
-            sol = optimize( ...
-                constraintsScaled, ...
-                objective, ...
-                options);
-
-
-        end
 
 
         %% =======================================================
@@ -729,6 +684,16 @@ for caseID = 1:3
         R_v = value(R);
 
         H_v = value(H);
+
+        He_v = value(He);
+
+
+        % Numerical diagnostics for the accepted SDP solution
+        maxBellL = max(abs(value(bellL_scaled)));
+        maxBellE = max(abs(value(bellE_scaled)));
+        minEigH  = min(eig((H_v+H_v')/2));
+        minEigHe = min(eig((He_v+He_v')/2));
+        minEigD  = min(eig(((H_v-He_v)+(H_v-He_v)')/2));
 
 
         Q_v_last = Q_v;
@@ -823,11 +788,13 @@ for caseID = 1:3
             ['Iter %2d | ' ...
              '||Kbar-Kbar*|| = %.6f | ' ...
              '||Knew-Kold|| = %.6f | ' ...
-             'R = %.4f\n'], ...
+             'R = %.4f | ' ...
+             'Bell = %.2e\n'], ...
             iter, ...
             gainError, ...
             policyStep, ...
-            R_v);
+            R_v, ...
+            max(maxBellL,maxBellE));
 
 
         %% Update gain
@@ -851,6 +818,14 @@ for caseID = 1:3
             fprintf( ...
                 'Final gain error = %.6f\n', ...
                 gainError);
+
+            fprintf( ...
+                'Max scaled Bellman residual = %.3e\n', ...
+                max(maxBellL,maxBellE));
+
+            fprintf( ...
+                'min eig(H) = %.3e, min eig(He) = %.3e, min eig(H-He) = %.3e\n', ...
+                minEigH,minEigHe,minEigD);
 
 
             break;
@@ -1225,11 +1200,13 @@ for row = 1:3
     end
 
 
-    legend( ...
-        '$\|\bar{K}_\tau-\bar{K}^*\|$', ...
-        'Interpreter','latex', ...
-        'Location','northeast', ...
-        'FontSize',13)
+    if npts > 0
+        legend( ...
+            '$\|\bar{K}_\tau-\bar{K}^*\|$', ...
+            'Interpreter','latex', ...
+            'Location','northeast', ...
+            'FontSize',13)
+    end
 
 
     title( ...
@@ -1281,11 +1258,13 @@ for row = 1:3
     end
 
 
-    legend( ...
-        '$R_\tau$', ...
-        'Interpreter','latex', ...
-        'Location','southeast', ...
-        'FontSize',13)
+    if npts > 0
+        legend( ...
+            '$R_\tau$', ...
+            'Interpreter','latex', ...
+            'Location','southeast', ...
+            'FontSize',13)
+    end
 
 
 
@@ -1330,11 +1309,13 @@ for row = 1:3
     end
 
 
-    legend( ...
-        '$\|\bar{Q}_\tau\|$', ...
-        'Interpreter','latex', ...
-        'Location','southeast', ...
-        'FontSize',13)
+    if npts > 0
+        legend( ...
+            '$\|Q_\tau\|_F$', ...
+            'Interpreter','latex', ...
+            'Location','southeast', ...
+            'FontSize',13)
+    end
 
 
     xlabel( ...

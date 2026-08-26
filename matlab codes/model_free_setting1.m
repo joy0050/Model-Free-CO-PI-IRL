@@ -45,7 +45,7 @@ for caseID = 1:3
         c11=Zl'*P*Zl-Yl'*P*Yl-Zl'*Qb*Zl; d11=Zel'*Pe*Zel-Ye'*Pe*Ye-Zel'*Qb*Zel;
         switch caseID
             case 1; obj=tau^2; cc=[eye(n+m)<=Qb<=tau*eye(n+m)];
-            case 2; obj=norm(Q,'fro')^2; cc=[R==R_true*eye(m),eye(n)<=Q,Q<=tau*eye(n),tau>=1];
+            case 2; obj=norm(Q,'fro')^2; cc=[R==1,eye(n)<=Q,Q<=tau*eye(n),tau>=1];
             case 3; obj=norm(Q,'fro')^2+norm(R,'fro')^2; cc=[trace(Q)+trace(R)==1,Q>=0,R>=1e-6*eye(m)];
         end
         CONS=[P>=0,Pe>=0,Q>=0,P-Pe>=0,c11==0,d11==0,cc];
